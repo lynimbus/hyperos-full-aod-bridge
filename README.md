@@ -12,7 +12,7 @@
 
 目前验证环境为小米 14 Pro（`shennong`）、Android 16、`OS3.0.307.0.WNBCNXM`、MIUI AOD `22335101`。使用同套框架结构的其他 HyperOS 机型和版本也可以尝试；框架类或字段发生变化时，需要针对相应版本调整反射目标。
 
-使用本模块前，需要通过系统设置、官改包或其他模块启用 `full_screen_aod_on`。
+使用本模块前，需要在对应机型的 `/product/etc/device_features/<codename>.xml` 中启用 `<bool name="support_aod_fullscreen">true</bool>`，并在系统设置中打开全屏 AOD。
 
 ## 安装
 
