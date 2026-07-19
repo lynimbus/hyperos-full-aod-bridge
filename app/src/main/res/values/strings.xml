@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HyperOS 全屏 AOD 恢复桥</string>
+    <string name="module_description">全屏 AOD 从隐藏恢复时，仅执行一次 NORMAL→写入最新亮度→DOZE。</string>
+</resources>
