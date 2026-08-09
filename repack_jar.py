@@ -10,8 +10,7 @@ PAD_HEADER_ID = 0xD935  # same extra-field id zipalign uses for padding
 
 
 def repack(src, dst, replacements):
-    zin = zipfile.ZipFile(src)
-    with zipfile.ZipFile(dst, "w") as zout:
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
         for info in zin.infolist():
             data = replacements.get(info.filename)
             if data is None:
@@ -28,7 +27,6 @@ def repack(src, dst, replacements):
                 if pad:
                     out.extra = struct.pack("<HH", PAD_HEADER_ID, pad) + b"\0" * pad
             zout.writestr(out, data)
-    zin.close()
 
 
 def main():

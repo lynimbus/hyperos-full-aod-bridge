@@ -1,3 +1,5 @@
 .tools/
 .work/
 out/
+tmp/
+services.jar

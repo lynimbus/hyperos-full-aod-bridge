@@ -5,26 +5,25 @@ import android.os.SystemClock;
 import android.util.Slog;
 import android.view.SurfaceControl;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
-
 /**
  * ROM-side full-screen AOD relight for the OFF -> DOZE recovery edge.
  *
- * Injected into {@code LocalDisplayAdapter$LocalDisplayDevice$1} at two points, mirroring the
- * structure of the LSPosed module (the only variant verified to actually light the panel):
+ * Injected at three points:
  *
  * <ol>
- *   <li>top of {@code setDisplayState(int)} -> {@link #onDisplayState} records the recovery edge;</li>
+ *   <li>top of {@code setDisplayState(int)} in {@code LocalDisplayAdapter$LocalDisplayDevice$1}
+ *       -> {@link #onDisplayState} records the recovery edge and, when the doze brightness is
+ *       already known (v3 prelight), relights the panel immediately;</li>
  *   <li>a wrapper around {@code setDisplayBrightness(float, float)} ->
  *       {@link #beginBrightness} / {@link #endBrightness} perform
- *       {@code NORMAL -> write -> DOZE} on that edge.</li>
+ *       {@code NORMAL -> write -> DOZE}, and double as the fallback path when the brightness
+ *       was not available at the state edge;</li>
+ *   <li>best-effort hook in {@code DisplayPowerController.updateAodAutoBrightness} ->
+ *       {@link #setDozeBrightness}, which feeds the bridge the doze brightness ~70 ms before
+ *       the adapter delivers it.</li>
  * </ol>
  *
- * <h2>Why the brightness write is the place to act</h2>
+ * <h2>Why the early brightness hook exists</h2>
  *
  * {@code DisplayPowerController} splits a recovery into two separate requests. Device logs
  * (Xiaomi 14 / houji, OS3.0.303.0.WNCCNXM):
@@ -36,19 +35,30 @@ import java.util.Locale;
  * .451  getDozeBrightness: 0.030490575       &lt;- the real value, a separate request
  * </pre>
  *
- * So the state-change request does not carry a usable brightness — 9 of 10 recovery edges reported
- * {@code brightness=-1.0}. Only the later brightness request knows the value, which is why the edge
- * has to be remembered across the two events. That is the single piece of state here.
+ * The state-change request does not carry a usable brightness (9 of 10 recovery edges report
+ * {@code brightness=-1.0}); the real doze brightness arrives ~73 ms later as its own request.
+ * v1/v2 waited for that brightness request, putting ~70 ms of the perceived wake latency on the
+ * critical path. v3 captures the value where {@code updateAodAutoBrightness} computes it (at
+ * .370, before the state is even dispatched) and relights at the state edge (.378), so the panel
+ * is lit ~66 ms after the state edge instead of ~139 ms.
+ *
+ * {@code getDozeBrightness} at .451 reads the same field {@code updateAodAutoBrightness} wrote,
+ * so the early value is the value the brightness request would carry; the later request then
+ * finds the edge already consumed, and its own write is rejected by the kernel (LP1 is on
+ * again) — the same stock rejection that happens on every recovery, harmless here because the
+ * value is identical.
  *
  * <h2>Ordering and the two sleeps</h2>
  *
- * At the brightness write the panel is already in LP1, so the write would be rejected by the N2/O2
- * kernel ({@code is_backlight_set_skip ... due to LP1 on}, present in this device's dmesg on every
- * recovery). The sequence is therefore NORMAL, write, back to DOZE.
+ * At the relight moment the panel is already in LP1, so a plain brightness write would be
+ * rejected by the N2/O2 kernel ({@code is_backlight_set_skip ... due to LP1 on}, present in this
+ * device's dmesg on every recovery). The sequence is therefore NORMAL, write, back to DOZE — in
+ * v3 all at the state edge when a prelight value is present, otherwise at the brightness edge.
  *
  * Both power mode and brightness are asynchronous SurfaceControl transactions. Measured on device,
  * {@code setDisplayPowerMode(NORMAL)} took ~27 ms to reach the panel, and a brightness write ~50 ms
- * to reach the kernel — a v2 attempt with a single 16 ms delay still lost the race and logged
+ * to reach the kernel — a v1 attempt with a single 16 ms delay still lost the race: its DOZE
+ * re-entry overtook the write, which landed on LP1 and was logged as
  * {@code skip set backlight 85 due to LP1 on}. Hence {@link #PANEL_SETTLE_MS} before the write and
  * {@link #COMMIT_DELAY_MS} before returning to DOZE. Both are tuning knobs: if the log shows the
  * relight completing but the panel still dark, raise them; the cost is added latency on the
@@ -60,7 +70,7 @@ import java.util.Locale;
  * {@code invoke-dynamic} against {@code StringConcatFactory.makeConcatWithConstants}, and ART
  * aborts the whole process while resolving that bootstrap method ({@code Runtime::Abort} — a native
  * abort, so no Java {@code catch} and no smali {@code .catchall} can contain it). That, not the
- * design, is what killed ROM patch v1 and v2.0: system_server died on the first log line before
+ * design, is what killed ROM patch v1: system_server died on the first log line before
  * anything reached logcat, leaving the panel mid-transition — which is also what produced v1's
  * "brightness stuck at a fixed low value" symptom. Stock services.jar contains zero references to
  * {@code StringConcatFactory}. {@code build.sh} compiles with {@code -XDstringConcat=inline} and
@@ -85,11 +95,18 @@ public final class AodDozeBridge {
     private static final long COMMIT_DELAY_MS = 64L;
 
     /**
+     * Fingerprint-auth Local HBM window on tap-to-wake: kernel skips backlight writes
+     * while it is on (~360ms measured). The re-write after this delay lands past it.
+     */
+    private static final long LHBM_WINDOW_MS = 400L;
+
+    /**
      * Logical display id with a pending OFF -> DOZE recovery edge, or {@link #NO_EDGE}.
      *
-     * The only mutable state. Set from {@code setDisplayState}, consumed by the next brightness
-     * write on the same display, and cleared on any OFF or ON transition so it can never survive
-     * into an unrelated screen-on session.
+     * The only mutable state besides the two brightness holders below. Set from
+     * {@code setDisplayState}, consumed by the next brightness write on the same display, and
+     * cleared on any OFF or ON transition so it can never survive into an unrelated screen-on
+     * session.
      */
     private static volatile int sPendingEdge = NO_EDGE;
 
@@ -101,15 +118,15 @@ public final class AodDozeBridge {
      */
     private static volatile IBinder sArmedToken;
 
-    private static final Object LOG_LOCK = new Object();
-
     /**
-     * Mirror of every log line, so a recovery attempt can be inspected after a reboot without
-     * catching it live on logcat. system_server runs as uid system and owns this directory.
+     * Doze brightness computed by {@code DisplayPowerController.updateAodAutoBrightness}
+     * (injected hook {@link #setDozeBrightness}) and not yet consumed by an OFF -> DOZE edge.
+     *
+     * Cleared on every OFF/ON transition so a value from an unrelated screen-on session can
+     * never be used, and moved out the moment the recovery edge is armed by
+     * {@link #onDisplayState}.
      */
-    private static final String LOG_PATH = "/data/system/aod_bridge.log";
-    /** Truncate rather than grow without bound; one recovery writes a couple of hundred bytes. */
-    private static final long LOG_MAX_BYTES = 256L * 1024L;
+    private static volatile float sDozeBrightnessInput = Float.NaN;
 
     private AodDozeBridge() {
     }
@@ -117,24 +134,60 @@ public final class AodDozeBridge {
     /**
      * Called at the top of {@code LocalDisplayAdapter$LocalDisplayDevice$1.setDisplayState(int)}.
      *
-     * Records nothing but the edge; the panel is not touched here.
+     * Arms the recovery edge and, when a doze brightness is already available from the
+     * {@link #setDozeBrightness} hook, returns it so the injected prelight code that follows
+     * can relight immediately; the panel itself is not touched here.
      *
      * @param displayId logical display id, from {@code getDisplayId(mPhysicalDisplayId)}
      * @param oldState  {@code val$oldState} of the display request
      * @param state     the state being applied
+     * @return the brightness to write right now, or {@code NaN} when the edge must wait for
+     *         the brightness request. At most one edge prelights per value.
      */
-    public static void onDisplayState(int displayId, int oldState, int state) {
+    public static float onDisplayState(int displayId, int oldState, int state) {
         try {
             if (state == STATE_OFF || state == STATE_ON) {
                 sPendingEdge = NO_EDGE;
-            } else if (oldState == STATE_OFF && isDoze(state) && isFullAod(displayId)) {
-                sPendingEdge = displayId;
-                info("armed OFF->DOZE edge, display=" + displayId + " state=" + state);
+                sDozeBrightnessInput = Float.NaN;
+                return Float.NaN;
             }
+            if (oldState == STATE_OFF && isDoze(state) && isFullAod(displayId)) {
+                sPendingEdge = displayId;
+                // Take the value fed by the updateAodAutoBrightness hook, if this recovery
+                // produced one. The injected hook right after this call consumes the return
+                // value.
+                float brightness = sDozeBrightnessInput;
+                sDozeBrightnessInput = Float.NaN;
+                info("armed OFF->DOZE edge, display=" + displayId + " state=" + state
+                        + (isUsable(brightness)
+                                ? " prelight=" + brightness : " prelight=none"));
+                return brightness;
+            }
+            return Float.NaN;
         } catch (Throwable t) {
             // A framework mismatch must degrade to a no-op, never to a boot loop.
             sPendingEdge = NO_EDGE;
+            sDozeBrightnessInput = Float.NaN;
             warn("onDisplayState failed", t);
+            return Float.NaN;
+        }
+    }
+
+    /**
+     * Called from the injected {@code DisplayPowerController.updateAodAutoBrightness} hook.
+     *
+     * Stores the freshly computed doze brightness so the state edge can relight immediately
+     * instead of waiting ~70 ms for the adapter's own brightness request. Best effort by
+     * design: {@link #onDisplayState} only uses the value when it is finite and positive, and
+     * the edge falls back to the brightness request otherwise.
+     *
+     * @param brightness the {@code newAodScreenAutoBrightness} the firmware just computed
+     */
+    public static void setDozeBrightness(float brightness) {
+        try {
+            sDozeBrightnessInput = isUsable(brightness) ? brightness : Float.NaN;
+        } catch (Throwable t) {
+            sDozeBrightnessInput = Float.NaN;
         }
     }
 
@@ -172,9 +225,8 @@ public final class AodDozeBridge {
                     + " brightness=" + committed);
             return 0.0f;
         }
-        if (!isFullAod(displayId)) {
-            return 0.0f;
-        }
+        // 边沿只在 onDisplayState 确认过 Full AOD 后才武装(sPendingEdge 被赋值)，
+        // 这里不必再调一次 isFullAodState binder。几十毫秒内 Full AOD 状态不会变。
 
         try {
             SurfaceControl.setDisplayPowerMode(token, POWER_MODE_NORMAL);
@@ -184,8 +236,25 @@ public final class AodDozeBridge {
         }
         sArmedToken = token;
         SystemClock.sleep(PANEL_SETTLE_MS);
-        info("relighting display " + displayId + " state=" + state
-                + " with brightness " + committed);
+        // 直接写面板亮度，不走原方法：Full AOD 状态下原方法会走“正常亮度”分支并调用
+        // updateDozeBrightness(0) 把 doze 亮度清零（实机 dmesg：relight 时刻写 backlight 0）。
+        // 返回非零表示 relight 已由桥完成，包装方法不再调用原方法。
+        try {
+            SurfaceControl.setDisplayBrightness(token, committed);
+            info("relighting display " + displayId + " state=" + state
+                    + " with brightness " + committed);
+        } catch (Throwable t) {
+            warn("cannot set brightness for display " + displayId, t);
+            return 0.0f;
+        }
+        // 点击唤醒触发的指纹认证 Local HBM 窗口内，内核会 skip 背光写入（面板不亮）。
+        // 延迟后补写一次，确保面板真正亮起；正常场景为同值重复写，无害。
+        SystemClock.sleep(LHBM_WINDOW_MS);
+        try {
+            SurfaceControl.setDisplayBrightness(token, committed);
+        } catch (Throwable t) {
+            warn("cannot re-set brightness for display " + displayId, t);
+        }
         return committed;
     }
 
@@ -227,45 +296,9 @@ public final class AodDozeBridge {
 
     private static void info(String message) {
         Slog.i(TAG, message);
-        appendToFile("I", message, null);
     }
 
     private static void warn(String message, Throwable t) {
         Slog.w(TAG, message, t);
-        appendToFile("W", message, t);
-    }
-
-    /**
-     * Appends one line to {@link #LOG_PATH}. Retrieve it after a reboot with
-     * {@code adb shell su -c 'cat /data/system/aod_bridge.log'}.
-     *
-     * Best effort by design: every failure here is swallowed, because losing a log line must never
-     * affect the display pipeline. Called at most a handful of times per screen-off cycle, so the
-     * synchronous write is not on any hot path.
-     */
-    private static void appendToFile(String level, String message, Throwable t) {
-        try {
-            synchronized (LOG_LOCK) {
-                File file = new File(LOG_PATH);
-                boolean truncate = file.length() > LOG_MAX_BYTES;
-                StringBuilder line = new StringBuilder();
-                line.append(new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
-                        .format(new Date()));
-                line.append(' ').append(level).append(' ').append(message);
-                if (t != null) {
-                    line.append(" | ").append(t.getClass().getName())
-                            .append(": ").append(t.getMessage());
-                }
-                line.append('\n');
-                FileOutputStream out = new FileOutputStream(file, !truncate);
-                try {
-                    out.write(line.toString().getBytes("UTF-8"));
-                } finally {
-                    out.close();
-                }
-            }
-        } catch (Throwable ignored) {
-            // Logging must never break the caller.
-        }
     }
 }

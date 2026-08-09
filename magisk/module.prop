@@ -1,6 +1,6 @@
 id=aod_doze_bridge_rom
 name=HyperOS Full AOD Bridge (framework)
-version=patch
-versionCode=1
+version=v3
+versionCode=3
 author=lynimbus
 description=请使用元模块挂载并关闭默认卸载模块
