@@ -71,11 +71,12 @@ No tests, no lint, no typecheck config, no CI. Compiling is the only offline che
 requires flashing to a rooted device.
 
 ```shell
-adb shell su -c 'cat /data/system/aod_bridge.log'
+adb logcat -s AodDozeBridge
 ```
 
-Every log line is mirrored there as well as to logcat, and the file survives the system_server
-restarts this code can cause. A healthy recovery is two lines:
+All log lines go to logcat under the tag `AodDozeBridge`; there is no log file. Start capturing
+before triggering the recovery — logcat only keeps a bounded ring buffer and nothing survives a
+reboot. A healthy recovery is two lines:
 
 ```text
 armed OFF->DOZE edge, display=0 state=3
@@ -93,12 +94,12 @@ line is success; `skip set backlight ... due to LP1 on` means it landed after LP
 too short. Note the framework's *own* write is rejected that way on every recovery — that is stock
 behaviour, not a regression.
 
-If *neither* the log file nor the framework's own unconditional
+If *neither* the expected `AodDozeBridge` log lines nor the framework's own unconditional
 `setDisplayState(id=..., state=DOZE)` line appears, the process died inside the injection —
 check `adb logcat -b crash -d`, not a tag filter.
 
 `su` is at `/system/bin/su` on the verified device (KernelSU); plain `su` is not on `PATH` for the
-`shell` user, and `/data/system/aod_bridge.log` is `0600 system:system`, so reading it needs root.
+`shell` user, so the `dmesg` check above needs root. `logcat` is readable without root.
 
 Do not claim a behavior change is verified without device logs — say what you could not check.
 

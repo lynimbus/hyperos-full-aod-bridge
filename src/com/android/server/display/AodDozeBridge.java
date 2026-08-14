@@ -5,11 +5,6 @@ import android.os.SystemClock;
 import android.util.Slog;
 import android.view.SurfaceControl;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
 
 /**
  * ROM-side full-screen AOD relight for the OFF -> DOZE recovery edge.
@@ -100,16 +95,6 @@ public final class AodDozeBridge {
      * wrapper pairs with a {@code .catchall}, so it cannot leak past one call.
      */
     private static volatile IBinder sArmedToken;
-
-    private static final Object LOG_LOCK = new Object();
-
-    /**
-     * Mirror of every log line, so a recovery attempt can be inspected after a reboot without
-     * catching it live on logcat. system_server runs as uid system and owns this directory.
-     */
-    private static final String LOG_PATH = "/data/system/aod_bridge.log";
-    /** Truncate rather than grow without bound; one recovery writes a couple of hundred bytes. */
-    private static final long LOG_MAX_BYTES = 256L * 1024L;
 
     private AodDozeBridge() {
     }
@@ -227,45 +212,9 @@ public final class AodDozeBridge {
 
     private static void info(String message) {
         Slog.i(TAG, message);
-        appendToFile("I", message, null);
     }
 
     private static void warn(String message, Throwable t) {
         Slog.w(TAG, message, t);
-        appendToFile("W", message, t);
-    }
-
-    /**
-     * Appends one line to {@link #LOG_PATH}. Retrieve it after a reboot with
-     * {@code adb shell su -c 'cat /data/system/aod_bridge.log'}.
-     *
-     * Best effort by design: every failure here is swallowed, because losing a log line must never
-     * affect the display pipeline. Called at most a handful of times per screen-off cycle, so the
-     * synchronous write is not on any hot path.
-     */
-    private static void appendToFile(String level, String message, Throwable t) {
-        try {
-            synchronized (LOG_LOCK) {
-                File file = new File(LOG_PATH);
-                boolean truncate = file.length() > LOG_MAX_BYTES;
-                StringBuilder line = new StringBuilder();
-                line.append(new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
-                        .format(new Date()));
-                line.append(' ').append(level).append(' ').append(message);
-                if (t != null) {
-                    line.append(" | ").append(t.getClass().getName())
-                            .append(": ").append(t.getMessage());
-                }
-                line.append('\n');
-                FileOutputStream out = new FileOutputStream(file, !truncate);
-                try {
-                    out.write(line.toString().getBytes("UTF-8"));
-                } finally {
-                    out.close();
-                }
-            }
-        } catch (Throwable ignored) {
-            // Logging must never break the caller.
-        }
     }
 }

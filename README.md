@@ -57,10 +57,10 @@ magisk/           刷入包的 module.prop 和 customize.sh
 
 ## 日志
 
-每条日志同时写入 logcat 与 `/data/system/aod_bridge.log`（热重启后仍保留，256 KB 循环覆写）：
+每条日志写入 logcat（tag `AodDozeBridge`），不落盘；若需重启后核查，请先在 logcat 中捕获：
 
 ```shell
-adb shell su -c 'cat /data/system/aod_bridge.log'
+adb logcat -s AodDozeBridge
 ```
 
 正常的恢复过程应产生两行日志：
