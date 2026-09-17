@@ -8,12 +8,19 @@
 
 ## 原理
 
-新增类 `AodDozeBridge`（编入 `classes2.dex`），在 `LocalDisplayAdapter$LocalDisplayDevice$1` 注入两处：
+新增类 `AodDozeBridge`（编入 `classes2.dex`），在 `LocalDisplayAdapter$LocalDisplayDevice$N`（承载 `setDisplayState`/`setDisplayBrightness` 的匿名 `Runnable`，序号随固件变化）注入两处：
 
 - `setDisplayState(I)`：开头仅记录 OFF→DOZE 边沿，不操作面板
 - `setDisplayBrightness(FF)`：原方法改名为 `aodBridgeSetDisplayBrightness`，新增同名包装：`beginBrightness()` → 原方法 → `endBrightness()`
 
 时序：记录边沿 → 写亮度时先将面板切换为 `NORMAL`，等待 16 ms，写入亮度，等待 64 ms，再切回 `DOZE`。介入需同时满足以下条件：存在待处理边沿、`isFullAodState` 为真、亮度为有限正数。
+
+### 固件适配
+
+注入目标按结构定位，不依赖匿名类序号：字段（`val$oldState` / `val$state` / `val$token` / `this$1`）与两个方法定义必须同时命中同一类且唯一，命中不唯一或签名不符时 `patch_smali.py` 直接报错退出，不产出补丁包。Android 16 的 houji 固件上是 `$1`；Android 17 的 houji 固件多了一个匿名 `Runnable`（`requestPrivacyBoostBrightnessRefreshLocked`），目标变成 `$2`。
+
+已验证点亮：Xiaomi 14（`houji`，Android 16，`OS3.0.303.0.WNCCNXM`）。
+Android 17 的 houji 固件（目标类 `$2`）只做完了构建与离线核对——回编译后反汇编、按方法签名逐条比对，除目标类与新增类之外与原厂 `classes2.dex` 一致——**未上机验证**。
 
 ### 为何必须在写亮度处注入
 

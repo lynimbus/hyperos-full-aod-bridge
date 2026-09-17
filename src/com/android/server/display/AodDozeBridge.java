@@ -9,7 +9,9 @@ import android.view.SurfaceControl;
 /**
  * ROM-side full-screen AOD relight for the OFF -> DOZE recovery edge.
  *
- * Injected into {@code LocalDisplayAdapter$LocalDisplayDevice$1} at two points, mirroring the
+ * Injected into the anonymous {@code LocalDisplayAdapter$LocalDisplayDevice$N} Runnable that
+ * carries {@code setDisplayState}/{@code setDisplayBrightness} (the index is firmware-dependent,
+ * resolved structurally by {@code patch_smali.py}) at two points, mirroring the
  * structure of the LSPosed module (the only variant verified to actually light the panel):
  *
  * <ol>
@@ -100,7 +102,7 @@ public final class AodDozeBridge {
     }
 
     /**
-     * Called at the top of {@code LocalDisplayAdapter$LocalDisplayDevice$1.setDisplayState(int)}.
+     * Called at the top of {@code LocalDisplayAdapter$LocalDisplayDevice$N.setDisplayState(int)}.
      *
      * Records nothing but the edge; the panel is not touched here.
      *
