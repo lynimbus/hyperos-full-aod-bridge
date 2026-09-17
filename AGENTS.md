@@ -39,9 +39,19 @@ prepends it, so run the script rather than invoking `javac` directly. If a previ
 truncated `.tools/jdk-17*` (no `bin/`), delete that directory and re-run; the script only re-extracts
 when the directory is absent.
 
+On NixOS the downloaded Adoptium JDK cannot exec: it wants `/lib64/ld-linux-x86-64.so.2`, which is
+`stub-ld` here (`nix-ld` is not enabled), so step 1 dies with "Could not start dynamically linked
+executable: javac". Fix it without touching the script or the system: delete/rename the Adoptium
+directory and symlink the name the script globs, e.g.
+`mv .tools/jdk-17* .tools/adoptium-jdk-unusable && ln -sfn $(nix build --no-link --print-out-paths nixpkgs#jdk17) .tools/jdk-17`.
+The glob must match exactly one entry, so the Adoptium directory has to go under a name that does
+not start with `jdk-17`.
+
 ## How the patch works
 
-Two injection points in `LocalDisplayAdapter$LocalDisplayDevice$1`:
+Two injection points in the `LocalDisplayAdapter$LocalDisplayDevice` anonymous `Runnable` that
+carries `setDisplayState(I)V` and `setDisplayBrightness(FF)V` (per-firmware class index: `$1` on
+houji `OS3.0.303.0.WNCCNXM`, `$2` on houji `OS4.0.0.24.XNCCNXM`):
 
 1. top of `setDisplayState(I)V` → `onDisplayState()` records the OFF→DOZE edge, touches nothing;
 2. `setDisplayBrightness(FF)V` is renamed to `aodBridgeSetDisplayBrightness` and a same-named wrapper
@@ -124,8 +134,13 @@ does not affect installs.
   keeps `setDisplayState`'s `.registers` unchanged (the hook only uses v0–v2, and no local is live at
   the top of the method). It fails loudly on mismatch — keep it that way rather than loosening the
   match.
-- The anonymous class index (`$1`) is hardcoded. If a firmware reorders those classes, the script
-  errors out rather than patching the wrong one.
+- The injection target is located structurally, not by index: `patch_smali.py` scans
+  `LocalDisplayAdapter$LocalDisplayDevice$N.smali` for the one class that has all four `val$*`
+  fields and both method definitions, and aborts unless exactly one class matches. The injected
+  method references are built from the matched class descriptor, so a firmware that renumbers the
+  anonymous classes (an extra `Runnable` shifted the target from `$1` to `$2` between Android 16 and
+  17 houji builds) is handled instead of mis-patched. Keep it failing loudly when the match is
+  ambiguous or incomplete rather than loosening the match.
 
 ## Conventions
 

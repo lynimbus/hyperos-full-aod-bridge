@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把 AodDozeBridge 的调用点注入 LocalDisplayAdapter$LocalDisplayDevice$1.smali。
+"""把 AodDozeBridge 的调用点注入 LocalDisplayAdapter$LocalDisplayDevice$N.smali。
 
 用法: patch_smali.py <smali 反汇编目录> <AodDozeBridge.smali>
 
@@ -15,42 +15,43 @@
 在几十毫秒后作为独立请求送来（实机日志证实 9/10 次边沿如此），只有那时才知道要写多少。
 
 3. 新增私有辅助方法 aodBridgeDisplayId()I，返回逻辑 displayId。
+
+注入目标是 LocalDisplayAdapter$LocalDisplayDevice$N 里承载这两个方法的匿名 Runnable。
+序号 N 随固件变化（OS3.0.303.0.WNCCNXM 是 $1；OS4.0.0.24.XNCCNXM 多了一个匿名 Runnable，
+requestDisplayStateLocked 的那个变成 $2），因此按结构定位而不是按序号，且要求匹配唯一。
 """
 import os
 import re
 import shutil
 import sys
 
-ANON = "Lcom/android/server/display/LocalDisplayAdapter$LocalDisplayDevice$1;"
 DEV = "Lcom/android/server/display/LocalDisplayAdapter$LocalDisplayDevice;"
 BRIDGE = "Lcom/android/server/display/AodDozeBridge;"
 
-# setDisplayState 注入点用的临时寄存器数量（v0..v2）。
-STATE_SCRATCH = 3
-
-STATE_HOOK = f"""
-    invoke-direct {{p0}}, {ANON}->aodBridgeDisplayId()I
+# 注入模板。目标类描述符运行时才知道，用 @ANON@ 占位。
+STATE_HOOK = """
+    invoke-direct {p0}, @ANON@->aodBridgeDisplayId()I
 
     move-result v0
 
-    iget v1, p0, {ANON}->val$oldState:I
+    iget v1, p0, @ANON@->val$oldState:I
 
     move v2, p1
 
-    invoke-static {{v0, v1, v2}}, {BRIDGE}->onDisplayState(III)V
+    invoke-static {v0, v1, v2}, @BRIDGE@->onDisplayState(III)V
 """
 
-HELPERS = f"""
+HELPERS = """
 .method private aodBridgeDisplayId()I
     .registers 4
 
-    iget-object v0, p0, {ANON}->this$1:{DEV}
+    iget-object v0, p0, @ANON@->this$1:@DEV@
 
-    invoke-static {{v0}}, {DEV}->-$$Nest$fgetmPhysicalDisplayId({DEV})J
+    invoke-static {v0}, @DEV@->-$$Nest$fgetmPhysicalDisplayId(@DEV@)J
 
     move-result-wide v1
 
-    invoke-virtual {{v0, v1, v2}}, {DEV}->getDisplayId(J)I
+    invoke-virtual {v0, v1, v2}, @DEV@->getDisplayId(J)I
 
     move-result v0
 
@@ -62,15 +63,15 @@ HELPERS = f"""
     .param p1, "brightnessState"    # F
     .param p2, "sdrBrightnessState"    # F
 
-    invoke-direct {{p0}}, {ANON}->aodBridgeDisplayId()I
+    invoke-direct {p0}, @ANON@->aodBridgeDisplayId()I
 
     move-result v0
 
-    iget v1, p0, {ANON}->val$state:I
+    iget v1, p0, @ANON@->val$state:I
 
-    iget-object v2, p0, {ANON}->val$token:Landroid/os/IBinder;
+    iget-object v2, p0, @ANON@->val$token:Landroid/os/IBinder;
 
-    invoke-static {{v0, v1, v2, p1}}, {BRIDGE}->beginBrightness(IILandroid/os/IBinder;F)F
+    invoke-static {v0, v1, v2, p1}, @BRIDGE@->beginBrightness(IILandroid/os/IBinder;F)F
 
     move-result v3
 
@@ -86,22 +87,25 @@ HELPERS = f"""
 
     :aod_bridge_original
     :try_start_aod_bridge
-    invoke-direct {{p0, p1, p2}}, {ANON}->aodBridgeSetDisplayBrightness(FF)V
+    invoke-direct {p0, p1, p2}, @ANON@->aodBridgeSetDisplayBrightness(FF)V
     :try_end_aod_bridge
-    .catchall {{:try_start_aod_bridge .. :try_end_aod_bridge}} :catchall_aod_bridge
+    .catchall {:try_start_aod_bridge .. :try_end_aod_bridge} :catchall_aod_bridge
 
-    invoke-static {{}}, {BRIDGE}->endBrightness()V
+    invoke-static {}, @BRIDGE@->endBrightness()V
 
     return-void
 
     :catchall_aod_bridge
     move-exception v5
 
-    invoke-static {{}}, {BRIDGE}->endBrightness()V
+    invoke-static {}, @BRIDGE@->endBrightness()V
 
     throw v5
 .end method
 """
+
+# setDisplayState 注入点用的临时寄存器数量（v0..v2）。
+STATE_SCRATCH = 3
 
 # 注入依赖的字段，缺一不可。
 REQUIRED_FIELDS = [
@@ -126,6 +130,30 @@ def fail(msg):
     sys.exit(1)
 
 
+def find_target(disp):
+    """定位承载 setDisplayState/setDisplayBrightness 的那个匿名 Runnable。
+
+    只按序号找会在固件重排匿名类时改错类（"$1" 在 OS4.0.0.24.XNCCNXM 上已经是另一个
+    Runnable）。这里要求字段与两个方法定义同时命中，且命中唯一，否则报错退出。
+    """
+    if not os.path.isdir(disp):
+        fail("找不到目录 " + disp)
+    pattern = re.compile(r"^LocalDisplayAdapter\$LocalDisplayDevice\$\d+\.smali$")
+    candidates = sorted(n for n in os.listdir(disp) if pattern.match(n))
+    if not candidates:
+        fail("找不到 LocalDisplayAdapter$LocalDisplayDevice$N 匿名类")
+    matches = []
+    for name in candidates:
+        text = open(os.path.join(disp, name), encoding="utf-8").read()
+        if (all(text.count(f) == 1 for f in REQUIRED_FIELDS)
+                and len(STATE_DEF.findall(text)) == 1
+                and len(BRIGHTNESS_DEF.findall(text)) == 1):
+            matches.append(name)
+    if len(matches) != 1:
+        fail("注入目标不唯一，命中 %d 个 %s（候选 %s）" % (len(matches), matches, candidates))
+    return os.path.join(disp, matches[0])
+
+
 def check_bridge(bridge_smali):
     """桥接类不能带 boot classpath 上跑不了的指令。
 
@@ -147,9 +175,8 @@ def main():
     tree, bridge_smali = sys.argv[1], sys.argv[2]
     check_bridge(bridge_smali)
     disp = os.path.join(tree, "com", "android", "server", "display")
-    target = os.path.join(disp, "LocalDisplayAdapter$LocalDisplayDevice$1.smali")
-    if not os.path.exists(target):
-        fail("找不到 " + target)
+    target = find_target(disp)
+    anon = "Lcom/android/server/display/" + os.path.basename(target)[: -len(".smali")] + ";"
 
     text = open(target, encoding="utf-8").read()
     if "AodDozeBridge" in text:
@@ -183,12 +210,17 @@ def main():
     if registers - 2 < STATE_SCRATCH:
         fail("setDisplayState(I)V 只有 %d 个局部寄存器，注入需要 %d 个"
              % (registers - 2, STATE_SCRATCH))
-    text = STATE_DEF.sub(lambda m: m.group(0) + STATE_HOOK, text, count=1)
+    hook = STATE_HOOK.replace("@ANON@", anon).replace("@BRIDGE@", BRIDGE)
+    text = STATE_DEF.sub(lambda m: m.group(0) + hook, text, count=1)
 
-    text = text.rstrip("\n") + "\n" + HELPERS
+    helpers = (HELPERS.replace("@ANON@", anon)
+                      .replace("@DEV@", DEV)
+                      .replace("@BRIDGE@", BRIDGE))
+    text = text.rstrip("\n") + "\n" + helpers
     open(target, "w", encoding="utf-8").write(text)
     shutil.copy(bridge_smali, os.path.join(disp, "AodDozeBridge.smali"))
-    print("已注入 %s（setDisplayState .registers %d 保持不变）" % (target, registers))
+    print("已注入 %s（setDisplayState .registers %d 保持不变）"
+          % (os.path.basename(target), registers))
 
 
 if __name__ == "__main__":
