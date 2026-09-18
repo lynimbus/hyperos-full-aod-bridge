@@ -20,7 +20,7 @@
 注入目标按结构定位，不依赖匿名类序号：字段（`val$oldState` / `val$state` / `val$token` / `this$1`）与两个方法定义必须同时命中同一类且唯一，命中不唯一或签名不符时 `patch_smali.py` 直接报错退出，不产出补丁包。Android 16 的 houji 固件上是 `$1`；Android 17 的 houji 固件多了一个匿名 `Runnable`（`requestPrivacyBoostBrightnessRefreshLocked`），目标变成 `$2`。
 
 已验证点亮：Xiaomi 14（`houji`，Android 16，`OS3.0.303.0.WNCCNXM`）。
-Android 17 的 houji 固件（目标类 `$2`）只做完了构建与离线核对——回编译后反汇编、按方法签名逐条比对，除目标类与新增类之外与原厂 `classes2.dex` 一致——**未上机验证**。
+Android 17 的 houji 固件（目标类 `$2`）同样已上机点亮，可正常开机；该次为目视确认，未留存 logcat / dmesg 日志。构建侧另做过离线核对——回编译后反汇编、按方法签名逐条比对，除目标类与新增类之外与原厂 `classes2.dex` 一致。
 
 ### 为何必须在写亮度处注入
 
